@@ -8,7 +8,7 @@ set(SPLATT_FLAGS "${SPLATT_FLAGS} -fPIC")
 
 if(${CMAKE_C_COMPILER_ID} STREQUAL "Intel")
   set(SPLATT_FLAGS "${SPLATT_FLAGS} -xHost")
-  set(SPLATT_FLAGS  "-restrict")
+  set(SPLATT_FLAGS "${SPLATT_FLAGS} -restrict")
 else()
   set(SPLATT_FLAGS "${SPLATT_FLAGS} -march=native")
   set(SPLATT_FLAGS "${SPLATT_FLAGS} -ftree-vectorize")
