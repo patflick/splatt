@@ -184,6 +184,9 @@ for i in "${@}"; do
     --debug)
       CONFIG_FLAGS="${CONFIG_FLAGS} -DDEBUG=1"
     ;;
+    --profiling)
+      CONFIG_FLAGS="${CONFIG_FLAGS} -DPROFILING=1"
+    ;;
     # dev
     --dev)
       CONFIG_FLAGS="${CONFIG_FLAGS} -DDEV_MODE=1"
