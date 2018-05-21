@@ -308,6 +308,165 @@ static idx_t p_admm_iterate_chunk(
 }
 
 
+val_t admm_stream(
+    idx_t mode,
+    matrix_t * * mats,
+    val_t * const restrict column_weights,
+    cpd_ws * const ws,
+    splatt_cpd_opts const * const cpd_opts,
+    splatt_global_opts const * const global_opts)
+{
+  timer_start(&timers[TIMER_ADMM]);
+
+  idx_t const rank = mats[mode]->J;
+
+  splatt_cpd_constraint * con = cpd_opts->constraints[mode];
+
+  /* (A^T * A) .* (B^T * B) .* .... ) */
+  mat_form_gram(ws->aTa, ws->gram, ws->nmodes, mode);
+  if(con->gram_func != NULL) {
+    con->gram_func(ws->gram->vals, rank, con->data);
+  }
+
+  /* these can be solved optimally without ADMM iterations */
+  if(con->solve_type == SPLATT_CON_CLOSEDFORM) {
+    p_constraint_closedform(mats[mode], ws, con);
+
+    /* Absorb columns into column_weights if no constraints are applied */
+    if(ws->unconstrained) {
+      mat_normalize(mats[mode], column_weights);
+    }
+    return 0.;
+  }
+
+  /* Add penalty to diagonal -- value taken from AO-ADMM paper */
+  val_t const rho = mat_trace(ws->gram) / (val_t) rank;
+  mat_add_diag(ws->gram, rho);
+
+  /* Compute Cholesky factorization to use for forward/backward solves each
+   * ADMM iteration */
+  mat_cholesky(ws->gram);
+
+  /* Compute number of chunks */
+#if 0
+  idx_t num_chunks = 1;
+  idx_t const chunk_size = cpd_opts->chunk_sizes[mode];
+  if(con->hints.row_separable && chunk_size > 0) {
+    num_chunks =  (mats[mode]->I / chunk_size);
+    if(mats[mode]->I % chunk_size > 0) {
+      ++num_chunks;
+    }
+  }
+#endif
+
+  idx_t it = 0;
+  // chunk by rows
+  #pragma omp parallel for schedule(dynamic) reduction(+:it) if(num_chunks > 1)
+  for(idx_t c=0; c < num_chunks; ++c) {
+    idx_t const start = c * chunk_size;
+    idx_t const stop = (c == num_chunks-1) ? mats[mode]->I : (c+1)*chunk_size;
+    idx_t const offset = start * rank;
+    idx_t const nrows = stop - start;
+
+    /* sub-matrix chunks */
+    matrix_t primal;
+    matrix_t auxil;
+    matrix_t dual;
+    matrix_t mttkrp;
+    matrix_t init_buf;
+
+    /* extract all the workspaces */
+    mat_fillptr(&primal, mats[mode]->vals + offset, nrows, rank,
+        mats[mode]->rowmajor);
+    mat_fillptr(&auxil, ws->auxil->vals + offset, nrows, rank,
+        ws->auxil->rowmajor);
+    mat_fillptr(&dual, ws->duals[mode]->vals + offset, nrows, rank,
+        ws->duals[mode]->rowmajor);
+    mat_fillptr(&mttkrp, ws->mttkrp_buf->vals + offset, nrows, rank,
+        ws->mttkrp_buf->rowmajor);
+    mat_fillptr(&init_buf, ws->mat_init->vals + offset, nrows, rank,
+        ws->mat_init->rowmajor);
+
+    /* should the ADMM kernels parallelize themselves? */
+    bool const should_parallelize = (num_chunks == 1);
+
+    // row-wise/vector-wise fused formation of rhs
+    for (idx in chunk) { // TODO this is the same as setup_axil (!!)
+      auxil[idx] = mttkrp[idx] + rho*(primal[idx] + dual[idx]);
+    }
+
+    // chunk solve chol
+    mat_solve_cholesky(ws->gram, auxil);
+
+    // form prox and compute norm
+    for (idx in chunk) {
+      x = auxil[idx] - dual[idx]
+      init[idx] = x
+      // TODO: compute colnorm and perform possible thresholding
+    }
+
+    // TODO: reduce over all chunks (stop chunkwise loop)
+    norms = ..;
+
+    for (idx_t idx = 0, j = 0; idx < nrows*ncols; ++idx, ++j) {
+      // this is shit for vectorization, maybe do it in a separate loop for by chunk
+      j = (j == ncols) ? 0 : j;
+      // TODO:
+      // instead do inner loop of some vector blocksize (64 bytes)
+      // - duplicate norms to at least (B + ncols)
+      // - ncols % blocksize  remainder, how to handle?
+      // - block b is element b*B, which is column: b*B % ncols
+
+      // compute new primal and dual residual
+      x = init[idx]/norms[j];
+      d_res = (x - primal[x])*(x - primal[x]);
+      primal[idx] = x;
+
+      // update primal norm
+      p_norm += x*x;
+
+      // update dual U <- U + (aux - pri)
+      y = aux[idx] - x;
+      di = dual[idx];
+      dual[idx] = di + y;
+
+      // update dual norm and primal residual
+      d_norm += di*di;
+      p_res += y*y;
+
+      // TODO: possibly,  first do the reduction of norms for earlier termination
+      // form next RHS for cholesky
+      auxil[idx] = mttkrp[idx] + rho*(x + di)
+    }
+    /*
+    for (idx_t i = 0; i < nrows; ++i) {
+      for (idx_t j = 0; j < ncols; ++j) {
+        // form new primal by normalization, form primal norm
+        // form new dual, compute dual norm, compute diff norms,
+        // form new rhs for auxil. all vectorized
+        // maybe better vectorized if we loop over I*K and keep track of some indeces for the primal normalization,
+        // since everything else is completely element-wise
+      }
+    }
+    */
+
+
+
+    /* Run ADMM until convergence and record total ADMM its per row. */
+    /*
+    idx_t const chunk_iters =  p_admm_iterate_chunk(&primal, &auxil, &dual,
+        ws->gram, &mttkrp, &init_buf, mode, con, rho, ws, cpd_opts,
+        global_opts, should_parallelize);
+    it += chunk_iters * nrows;
+    */
+  } /* foreach chunk */
+
+  timer_stop(&timers[TIMER_ADMM]);
+
+  /* return average # iterations */
+  return (val_t) it / (val_t) mats[mode]->I;
+}
+
 
 /******************************************************************************
  * PUBLIC FUNCTIONS
