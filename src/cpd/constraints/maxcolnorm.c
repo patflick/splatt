@@ -73,84 +73,51 @@ void splatt_maxcolnorm_prox(
 {
   assert(should_parallelize);
 
-#define B 8
+  val_t * restrict A = primal;
+
   // column-wise normalization of row-major matrix
-  // optimized using blocking of cache-lines to improve cache efficiency
-  // and mitigate false sharing during write-back
 
-  idx_t const Bmod = ncols % B;
-#pragma omp parallel
+  #pragma omp parallel
   {
-#pragma omp single nowait
-  {
-  // for extra columns
-  if (Bmod > 0) {
-    double * norms = (double *) splatt_malloc(Bmod * sizeof(double));
-    memset(norms, 0, Bmod*sizeof(double));
-    idx_t Boff = ncols - Bmod;
+  double * restrict norms = (double*) splatt_malloc(nrows*sizeof(double));
+  memset(norms, 0, nrows*sizeof(double));
 
-    for(idx_t i=0; i < nrows; ++i) {
-      idx_t const index = Boff + (i*ncols);
-      for (idx_t j=0; j < Bmod; ++j) {
-        norms[j] += primal[index+j] * primal[index+j];
-      }
-    }
-
-    int all = 1;
-    for (idx_t j=0; j < Bmod; ++j) {
-      norms[j] = sqrt(norms[j]);
-      all &= (norms[j] <= 1.);
-      norms[j] = (norms[j] <= 1.) ? norms[j] : 1.;
-    }
-    // if all < 1: continue
-    if (all == 0) {
-      // normalize all columns
-      for(idx_t i=0; i < nrows; ++i) {
-        idx_t const index = Boff + (i*ncols);
-        for (idx_t j=0; j < Bmod; j++) {
-          primal[index+j] /= norms[j];
-        }
-      }
-    }
-    splatt_free(norms);
-  }
-  } // omp single nowait
-  #pragma omp for schedule(dynamic)
-  for(idx_t b=0; b < ncols/B; ++b) {
-    double norms[B];
-    memset(norms, 0, B*sizeof(double));
-
-    for(idx_t i=0; i < nrows; ++i) {
-      idx_t const index = b*B + (i*ncols);
-#pragma simd
-      for (idx_t j=0; j < B; ++j) {
-        norms[j] += primal[index+j] * primal[index+j];
-      }
-    }
-
-    int all = 1;
-    for (idx_t j=0; j < B; ++j) {
-      norms[j] = sqrt(norms[j]);
-      all &= (norms[j] <= 1.);
-      norms[j] = (norms[j] <= 1.) ? norms[j] : 1.;
-    }
-    // if all < 1: continue
-    if (all)
-      continue;
-
-    // normalize all columns
-    for(idx_t i=0; i < nrows; ++i) {
-      idx_t const index = b*B + (i*ncols);
-#pragma simd
-      for (idx_t j=0; j < B; ++j) {
-        primal[index+j] /= norms[j];
-      }
+  #pragma omp for schedule(static)
+  for (idx_t i=0; i < nrows; ++i) {
+    #pragma simd
+    for (idx_t j=0; j < ncols; ++j) {
+      idx_t const idx = i*ncols + j;
+      norms[j] += A[idx] * A[idx];
     }
   }
-  } // omp parallel
+
+  #pragma omp barrier
+  thread_allreduce(norms, nrows, SPLATT_REDUCE_SUM);
+
+
+  // row sums are copies on every thread, thus every thread
+  // finishes computing the norm
+  for (idx_t j=0; j < ncols; ++j) {
+    norms[j] = sqrt(norms[j]);
+    //all &= (norms[j] <= 1.);
+    norms[j] = (norms[j] > 1.) ? norms[j] : 1.;
+  }
+
+#pragma omp for schedule(static)
+  for (idx_t i=0; i < nrows; ++i) {
+    #pragma simd
+    for (idx_t j=0; j < ncols; ++j) {
+      idx_t const idx = i*ncols + j;
+      A[idx] /= norms[j];
+    }
+  }
+
+  splatt_free(norms);
+
+  }
+
 }
 
-#undef B
 
 /******************************************************************************
  * API FUNCTIONS
